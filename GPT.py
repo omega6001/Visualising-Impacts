@@ -6,14 +6,15 @@ import matplotlib.cm
 from wgpu.gui.offscreen import WgpuCanvas
 from PIL import Image
 import subprocess
-import pylinalg as la
+from scipy.cluster.vq import kmeans2
 
-
+# Camera and lighting setup
 campos = np.array([250, 250, 400], dtype=np.float32)
 lookat = np.array([250, 250, 250], dtype=np.float32)
-light_dir = (0, 1, 0)
+light_dir = (-1, 1, -1)
 
 def get_global_density_range(folder):
+    """Scan all frames to determine global density min/max for consistent normalization."""
     dmin, dmax = np.inf, -np.inf
     for fname in sorted(os.listdir(folder)):
         if fname.endswith(".hdf5"):
@@ -23,90 +24,101 @@ def get_global_density_range(folder):
                 dmax = max(dmax, d.max())
     return dmin, dmax
 
-
-def normalize_array_global(arr, dmin, dmax, contrast=1.5):
+def normalize_array_global(arr, dmin, dmax, contrast=0.7):
     norm = (arr - dmin) / (dmax - dmin + 1e-11)
     return np.clip(norm**contrast, 0, 1)
 
+def compute_fake_normals_from_clusters(positions, k=1):
+    """Assign normal vectors from particle to its cluster center."""
+    if len(positions) == 0 or k < 1:
+        return np.zeros((len(positions), 3), dtype=np.float32)
 
-def get_depth_sorted(positions, colors, camera_matrix):
-    """Return positions and colors sorted by view-space depth (Z)."""
-    # Convert to homogeneous coordinates
-    pos_h = np.concatenate([positions, np.ones((positions.shape[0], 1), dtype=np.float32)], axis=1)
+    k = min(k, len(positions))  # avoid k > n
+    centroids, labels = kmeans2(positions.astype(np.float32), k, minit='points')
 
-    # Transform to camera/view space
-    view_pos = pos_h @ camera_matrix.T  # shape: (N, 4)
+    vectors = centroids[labels] - positions
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms < 1e-12] = 1.0
 
-    # Use negative Z (depth) for sorting — we want farthest first
-    depth = -view_pos[:, 2]
-    sort_idx = np.argsort(depth)[::-1]  # farthest to nearest
+    return (vectors / norms).astype(np.float32)
 
-    return positions[sort_idx], colors[sort_idx]
-
-
-def render_and_save(positions, densities, output_path, img_size=(1920, 1080)):
-    # Setup canvas and renderer
+def render_and_save(positions, densities, output_path, img_size=(1920, 1080), dmin=None, dmax=None, frame_idx=0):
+    # Create canvas and renderer
     canvas = WgpuCanvas(size=img_size, pixel_ratio=1)
     renderer = gfx.renderers.WgpuRenderer(canvas)
-
-    # Scene setup
     scene = gfx.Scene()
-    scene.add(gfx.DirectionalLight(light_dir))
 
-    # Normalize densities (full range) with contrast boost
-    
-    norm_dens = normalize_array_global(densities, dmin, dmax, contrast=0.3)
-    cmap = matplotlib.cm.get_cmap("inferno")
-    colors = cmap(norm_dens)[:, :3].astype(np.float32)  # RGB only
+    # Normalize and color-map densities
+    norm_dens = np.clip(((densities - dmin) / (dmax - dmin + 1e-12)) ** 0.9, 0, 1)
+    cmap = matplotlib.cm.get_cmap("autumn")
+    base_colors = cmap(norm_dens)[:, :3].astype(np.float32)
+#################
+    base_colors *= 1.3  # Brighten base colors slightly
+    base_colors = np.clip(base_colors, 0, 1)
+    # Choose k clusters based on frame number
+    if frame_idx <= 7:
+        k=2
+    elif frame_idx > 7 and frame_idx <45:
+        k = 1
+    else:
+        k=1
+    normals = compute_fake_normals_from_clusters(positions, k=k)
 
-    # Camera setup
+    # Lighting calculation
+    light = np.array(light_dir, dtype=np.float32)
+    light /= np.linalg.norm(light)
+
+    diffuse = np.clip(np.dot(normals, light), 0, 1)
+    ambient = 0.1
+    brightness = ambient + (1 - ambient) * diffuse**1.5
+    shaded_colors = base_colors * brightness[:, None]
+    shaded_colors = np.clip(shaded_colors, 0, 1).astype(np.float32)
+
+    # Camera
     camera = gfx.PerspectiveCamera(60, img_size[0] / img_size[1])
     camera.local.position = campos
     camera.look_at(lookat)
 
-    # Sort particles by distance from camera (farthest to nearest)
+    # Sort for proper blending
     distances = np.linalg.norm(positions - campos, axis=1)
     sort_idx = np.argsort(distances)[::-1]
     sorted_positions = positions[sort_idx]
-    sorted_colors = colors[sort_idx]
+    sorted_colors = shaded_colors[sort_idx]
 
-    # Create geometry and material
+    # Geometry + rendering
     geometry = gfx.Geometry(positions=sorted_positions.astype(np.float32), colors=sorted_colors)
     material = gfx.PointsMaterial(color_mode="vertex", size=1.0)
     points = gfx.Points(geometry, material)
     scene.add(points)
 
-    # Render once
     canvas.request_draw(lambda: renderer.render(scene, camera))
-    image_data = np.asarray(canvas.draw())  # (H, W, 4) uint8 array
-
-    # Save as PNG with PIL
-    image = Image.fromarray(image_data, mode="RGBA")
-    image.save(output_path)
-
+    image_data = np.asarray(canvas.draw())
+    Image.fromarray(image_data, mode="RGBA").save(output_path)
 
 def process_folder(hdf5_folder, out_folder):
     os.makedirs(out_folder, exist_ok=True)
+    dmin, dmax = get_global_density_range(hdf5_folder)
 
-    for fname in sorted(os.listdir(hdf5_folder)):
+    for frame_idx, fname in enumerate(sorted(os.listdir(hdf5_folder))):
         if not fname.endswith('.hdf5'):
             continue
         path = os.path.join(hdf5_folder, fname)
         with h5py.File(path, 'r') as f:
-            positions = f['PartType0/Coordinates'][:]  # shape: (N, 3)
-            densities = f['PartType0/Densities'][:]   # shape: (N,)
+            positions = f['PartType0/Coordinates'][:]
+            densities = f['PartType0/Densities'][:]
 
-        print(f"Rendering {fname} with {len(positions)} particles")
+        print(f"Rendering {fname} (frame {frame_idx}) with {len(positions)} particles")
         output_file = os.path.splitext(fname)[0] + ".png"
-        render_and_save(positions, densities, os.path.join(out_folder, output_file))
 
+        render_and_save(positions, densities, os.path.join(out_folder, output_file),
+                        dmin=dmin, dmax=dmax, frame_idx=frame_idx)
 
 if __name__ == "__main__":
-    dmin,dmax = get_global_density_range("data/")
+    dmin, dmax = get_global_density_range("data/")
     process_folder("data/", "frames")
+
     image_folder = './frames'
     output_video = 'output_wgpu.mp4'
-
     os.chdir(image_folder)
 
     ffmpeg_cmd = [
