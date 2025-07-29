@@ -10,18 +10,13 @@ import scipy.spatial
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import map_coordinates
 import numba as nb
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
+
 # Fixed camera settings
 campos = np.array([320, 320, 420], dtype=np.float32)
 lookat = np.array([320, 320, 320], dtype=np.float32)#(250,250,250)
 
-def clamp(x, min_val=0.0, max_val=255.0):
-    return np.clip(x, min_val, max_val)
 
-
-
-def pointcloud_to_grid(positions, densities, grid_size=(1000, 1000, 1000), global_min=None, global_max=None):
+def pointcloud_to_grid(positions, densities, grid_size=(500, 500, 500), global_min=None, global_max=None):
     positions = np.array(positions)
     densities = np.array(densities)
 
@@ -34,50 +29,6 @@ def pointcloud_to_grid(positions, densities, grid_size=(1000, 1000, 1000), globa
         grid[x, y, z] += dens
     return grid
 
-
-
-def get_blackbody_color(T):
-    T = np.clip(T, 1000.0, 40000.0)
-    t = T / 1000.0
-
-    # Avoid invalid power/log inputs
-    safe_t_minus_60 = np.clip(t - 60.0, 0.01, None)
-    safe_t_log = np.clip(t, 0.01, None)
-    safe_t_minus_10 = np.clip(t - 10.0, 0.01, None)
-
-    # Red
-    r = np.where(t <= 66.0, 255.0, 329.698727446 * safe_t_minus_60 ** -0.1332047592)
-    r = clamp(r)
-
-    # Green
-    g = np.where(
-        t <= 66.0,
-        99.4708025861 * np.log(safe_t_log) - 161.1195681661,
-        288.1221695283 * safe_t_minus_60 ** -0.0755148492
-    )
-    g = clamp(g)
-
-    # Blue
-    b = np.where(
-        t >= 66.0,
-        255.0,
-        np.where(
-            t <= 19.0,
-            0.0,
-            138.5177312231 * np.log(safe_t_minus_10) - 305.0447927307
-        )
-    )
-    b = clamp(b)
-
-    return np.stack([r, g, b], axis=-1) / 255.0
-
-def get_emissive_blackbody_color(T):
-    """
-    Blackbody color modulated by emission intensity for visual glow effect.
-    """
-    color = get_blackbody_color(T)
-    intensity = np.clip(T / 8000.0, 0.0, 1.0) ** 4
-    return color * intensity[..., np.newaxis]
 
 def get_global_bounds(folder):
     min_all = np.full(3, np.inf)
@@ -164,7 +115,7 @@ def sph_density_grid_fast(
 
 def sph_density_grid_wrapper(
     positions, masses, smoothing_lengths,
-    grid_size=(400, 400, 400),
+    grid_size=(500, 500, 500),
     global_min=None, global_max=None
 ):
     grid = np.zeros(grid_size, dtype=np.float32)
@@ -177,7 +128,7 @@ def sph_density_grid_wrapper(
         np.array(global_max, dtype=np.float32)
     )
 
-def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, output_path,mesh_colors,internal_energy_at_verts, img_size=(1920, 1080)):
+def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, output_path, img_size=(1920, 1080)):
     canvas = WgpuCanvas(size=img_size, pixel_ratio=1)
     renderer = gfx.renderers.WgpuRenderer(canvas)
     scene = gfx.Scene()
@@ -195,23 +146,15 @@ def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, outp
     # Mesh
     geometry = gfx.Geometry(
         positions=verts_world.astype(np.float32),
-        indices=faces.astype(np.uint32),
-        colors=mesh_colors.astype(np.float32)
+        indices=faces.astype(np.uint32)
     )
-    material = gfx.MeshPhongMaterial(color_mode="vertex", shininess=20)
+    material = gfx.MeshPhongMaterial(color=(1, 0.5, 0.2), shininess=20)
     mesh = gfx.Mesh(geometry, material)
     scene.add(mesh)
 
     # Nearest mesh vertex for each halo point
     tree = scipy.spatial.cKDTree(verts_world)
     _, nearest_indices = tree.query(halo_positions, k=1)
-    # Assume you passed internal_energy_at_verts into this function (will fix this below)
-    matched_internal_energy = internal_energy_at_verts[nearest_indices]
-    # Convert to approximate temperature (T ∝ u)
-    # You can scale this if your units are arbitrary (e.g., multiply by 1e4)
-    approx_temperature = np.clip(matched_internal_energy * 1e4, 1000, 12000)
-    # Convert to blackbody RGB
-    halo_colors = np.array([get_emissive_blackbody_color(t) for t in approx_temperature])
     matched_normals = mesh_normals[nearest_indices]
 
     # Lighting for halo particles
@@ -221,7 +164,7 @@ def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, outp
     brightness = 0.3 + 1 * (diffuse ** 1.5)
 
     base_color = np.array([1.0, 0.6, 0.0], dtype=np.float32)
-    glow_colors = (brightness[:, None] * halo_colors).astype(np.float32)
+    glow_colors = (brightness[:, None] * base_color[None, :]).astype(np.float32)
 
     # Halo glow
     if len(halo_positions) != 0:
@@ -254,7 +197,7 @@ def interpolate_voxel_grids(grid_a, grid_b, steps=4):
 
 def process_with_interpolated_marching_cubes(
     hdf5_folder, out_folder, bounds_min, bounds_max,
-    grid_size=(600, 600, 600), interp_steps=2, blur_sigma=1.0
+    grid_size=(1200, 1200, 1200), interp_steps=5, blur_sigma=1.0
 ):
     global p
     os.makedirs(out_folder, exist_ok=True)
@@ -275,13 +218,11 @@ def process_with_interpolated_marching_cubes(
             positions_a = fa['PartType0/Coordinates'][:]
             velocities_a = fa['PartType0/Velocities'][:]
             densities_a = fa['PartType0/Densities'][:]
-            internal_energy_a = fa['PartType0/InternalEnergies'][:]
             
             ids_b = fb['PartType0/ParticleIDs'][:]
             positions_b = fb['PartType0/Coordinates'][:]
             velocities_b = fb['PartType0/Velocities'][:]
             densities_b = fb['PartType0/Densities'][:]
-            internal_energy_b = fb['PartType0/InternalEnergies'][:]
 
 
             time_a = fa.attrs.get('Time', 0.0)
@@ -313,7 +254,6 @@ def process_with_interpolated_marching_cubes(
 
                 # Linear interpolate densities (or optionally hermite if you have density derivatives)
                 interp_densities = (1 - t) * dens_a_matched + t * dens_b_matched
-                interp_internal_energy = (1 - t) * internal_energy_a[idx_a] + t * internal_energy_b[idx_b]
 
                 # Build the SPH grid from these interpolated particles only
                 grid_interp = pointcloud_to_grid(
@@ -322,17 +262,9 @@ def process_with_interpolated_marching_cubes(
                     global_min=bounds_min,
                     global_max=bounds_max
                 )
-                grid_internal_energy = pointcloud_to_grid(
-                    interp_positions, interp_internal_energy,
-                    grid_size=grid_size,
-                    global_min=bounds_min,
-                    global_max=bounds_max
-                )
-                grid_internal_energy = gaussian_filter(grid_internal_energy, sigma=blur_sigma)
 
-                # Sample internal energy at mesh vertices
-
-
+                # Optional Gaussian blur
+                grid_interp = gaussian_filter(grid_interp, sigma=blur_sigma)
 
                 # Skip if empty
                 if grid_interp.max() <= 0:
@@ -341,28 +273,11 @@ def process_with_interpolated_marching_cubes(
 
                 threshold = grid_interp.max() * 0.001
                 verts, faces, normals, _ = marching_cubes(grid_interp, level=threshold)
-                scaled_verts = (verts / (np.array(grid_size) - 1)).T
-                coords_world = scaled_verts * (bounds_max - bounds_min).reshape(3, 1) + bounds_min.reshape(3, 1)
-                coords_idx = ((coords_world - bounds_min.reshape(3, 1)) /
-                            (bounds_max - bounds_min).reshape(3, 1) *
-                            (np.array(grid_size).reshape(3, 1) - 1))
-                internal_energy_at_verts = map_coordinates(grid_internal_energy, coords_idx, order=1, mode='nearest')
-                # Optional Gaussian blur
-                grid_interp = gaussian_filter(grid_interp, sigma=blur_sigma)
 
                 scale = (bounds_max - bounds_min) / (np.array(grid_size) - 1)
                 verts_world = verts * scale + bounds_min
-                verts_grid = verts.T  # shape (3, N) for map_coordinates
-                scaled_verts = (verts / (np.array(grid_size) - 1)).T
-                voxel_coords = np.clip(np.round(scaled_verts).astype(int), 0, np.array(grid_size).reshape(3,1) - 1)
-                voxel_energy = grid_internal_energy[
-                    voxel_coords[0], voxel_coords[1], voxel_coords[2]
-                ]
-                temperature = voxel_energy * 2e7  # Tune this empirically
 
-                mesh_colors = get_emissive_blackbody_color(temperature)  # shape (N, 3)
-
-
+                #output_file = f"{os.path.splitext(fname_a)[0]}_interp{s:02d}.png"
                 output_file = f"frame_interp{p:04d}.png"
                 output_path = os.path.join(out_folder, output_file)
 
@@ -371,9 +286,7 @@ def process_with_interpolated_marching_cubes(
                     faces,
                     interp_positions,
                     normals,
-                    output_path,
-                    mesh_colors,
-                    internal_energy_at_verts=internal_energy_at_verts
+                    output_path
                 )
                 p=p+1
 
@@ -386,19 +299,19 @@ if __name__ == "__main__":
 
     process_with_interpolated_marching_cubes(
         "outs/", "frames_interp", bounds_min, bounds_max,
-        grid_size=(400, 400, 400),
+        grid_size=(500, 500, 500),
         interp_steps=5,
         blur_sigma=1.2
     )   
 
     # Create video
-    output_video = 'output_mesh1e6.mp4'
+    output_video = 'output_mesh1e6_interp.mp4'
     os.chdir(output_folder)
 
     ffmpeg_cmd = [
         'ffmpeg',
-        '-framerate', '8',
-        '-i', 'impact1e6_0%03d.png',
+        '-framerate', '20',
+        '-i', 'frame_0%03d.png',
         '-vf', 'scale=1920:1080',
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',

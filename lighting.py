@@ -59,9 +59,9 @@ def render_and_save(positions, densities, output_path, img_size=(1920, 1080), dm
     if frame_idx <= 7:
         k=2
     elif frame_idx > 7 and frame_idx <45:
-        k = 1
+        k = 2
     else:
-        k=1
+        k=2
     normals = compute_fake_normals_from_clusters(positions, k=k)
 
     # Lighting calculation
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     process_folder("outs/", "frames2")
 
     image_folder = './frames2'
-    output_video = 'output_1e6.mp4'
+    output_video = 'output_1e6_test.mp4'
     os.chdir(image_folder)
 
     ffmpeg_cmd = [

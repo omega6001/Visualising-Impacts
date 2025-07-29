@@ -23,7 +23,7 @@ def get_global_bounds(folder):
                 max_all = np.maximum(max_all, coords.max(axis=0))
     return min_all, max_all
 
-def pointcloud_to_grid(positions, densities, grid_size=(400, 400, 400), global_min=None, global_max=None):
+def pointcloud_to_grid(positions, densities, grid_size=(1000, 1000, 1000), global_min=None, global_max=None):
     positions = np.array(positions)
     densities = np.array(densities)
 
@@ -56,7 +56,7 @@ def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, outp
         positions=verts_world.astype(np.float32),
         indices=faces.astype(np.uint32)
     )
-    material = gfx.MeshPhongMaterial(color=(1, 0.5, 0.2), shininess=100)
+    material = gfx.MeshPhongMaterial(color=(1, 0.5, 0.2), shininess=50)
     mesh = gfx.Mesh(geometry, material)
     scene.add(mesh)
 
@@ -69,7 +69,7 @@ def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, outp
     light_dir = np.array([1, 1, 1], dtype=np.float32)
     light_dir /= np.linalg.norm(light_dir)
     diffuse = np.clip(np.dot(matched_normals, light_dir), 0, 1)
-    brightness = 0.2 + 1 * (diffuse ** 1.5)
+    brightness = 0.3 + 1 * (diffuse ** 1.5)
 
     base_color = np.array([1.0, 0.6, 0.0], dtype=np.float32)
     glow_colors = (brightness[:, None] * base_color[None, :]).astype(np.float32)
@@ -96,7 +96,7 @@ def render_mesh_with_halo(verts_world, faces, halo_positions, mesh_normals, outp
     image_data = np.asarray(canvas.draw())
     Image.fromarray(image_data, mode="RGBA").save(output_path)
 
-def process_with_marching_cubes(hdf5_folder, out_folder, bounds_min, bounds_max, grid_size=(400, 400, 400)):
+def process_with_marching_cubes(hdf5_folder, out_folder, bounds_min, bounds_max, grid_size=(1000, 1000, 1000)):
     os.makedirs(out_folder, exist_ok=True)
 
     for frame_idx, fname in enumerate(sorted(os.listdir(hdf5_folder))):
@@ -121,7 +121,7 @@ def process_with_marching_cubes(hdf5_folder, out_folder, bounds_min, bounds_max,
             print("Skipping frame due to zero density")
             continue
 
-        threshold = grid.max() * 0.0075
+        threshold = grid.max() * 0.008
 
         verts, faces, normals, _ = marching_cubes(grid, level=threshold)
 
@@ -153,12 +153,12 @@ if __name__ == "__main__":
     process_with_marching_cubes(input_folder, output_folder, bounds_min, bounds_max)
 
     # Create video
-    output_video = 'output_mesh1e6.mp4'
+    output_video = 'output_mesh1e6_test.mp4'
     os.chdir(output_folder)
 
     ffmpeg_cmd = [
         'ffmpeg',
-        '-framerate', '5',
+        '-framerate', '8',
         '-i', 'impact1e6_0%03d.png',
         '-vf', 'scale=1920:1080',
         '-c:v', 'libx264',

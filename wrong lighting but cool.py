@@ -160,7 +160,7 @@ if __name__ == "__main__":
     process_folder("outs/", "frames2")
 
     image_folder = './frames2'
-    output_video = 'output_1e6.mp4'
+    output_video = 'output_1e6_cool.mp4'
     os.chdir(image_folder)
 
     ffmpeg_cmd = [
