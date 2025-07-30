@@ -74,7 +74,7 @@ impactor = woma.Planet(
 
 # Generate the profiles
 target.gen_prof_L2_find_R1_given_M_R(verbosity=1)
-impactor.gen_prof_L1_find_R_given_M(R_max= 10*R_earth)
+impactor.gen_prof_L1_find_R_given_M(R_max= 5*R_earth)
 
 
 

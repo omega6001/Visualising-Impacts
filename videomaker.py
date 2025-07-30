@@ -14,16 +14,16 @@ frame_files = sorted(os.listdir(input_folder))
         #dst = os.path.join(output_folder, f"frame_{i:04d}.png")
         #Image.open(src).save(dst)
         
-os.chdir("frames_interp")
+os.chdir("rendered_frames")
 
 ffmpeg_cmd = [
     "ffmpeg",
     "-framerate", "15",
-    "-i", "frame_interp%04d.png",
+    "-i", "frame_%04d.png",
     "-vf", "scale=1920:1080",
     "-c:v", "libx264",
     "-pix_fmt", "yuv420p",
-    "../output_interp.mp4"
+    "../output_colour_hot.mp4"
 ]
 
 subprocess.run(ffmpeg_cmd, check=True)
