@@ -184,7 +184,7 @@ def process_with_interpolated_marching_cubes_cpu(
                     interp_pos, interp_dens, coarse_grid_size, bounds_min, bounds_max
                 )
                 coarse_dens_grid = gaussian_filter(coarse_dens_grid, sigma=1.0)
-                threshold = coarse_dens_grid.max() * 1e-6                
+                threshold = coarse_dens_grid.max() * 1e-5                
                 active_cells = np.argwhere(coarse_dens_grid > threshold)
                 print(f"Found {len(active_cells)} active coarse grid cells")
 
@@ -282,7 +282,7 @@ def process_with_interpolated_marching_cubes_cpu(
                     weight = np.clip(2000 * (density_at_verts - 0.001), 0.0, 1.0)
                     weight[grad_mag < 1e-6] = 0.0
                     #####################################LIGHTING#######################################
-                    light_dir = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+                    light_dir = np.array([-1.0, 1.0, -1.0], dtype=np.float32)
                     light_dir /= np.linalg.norm(light_dir)
                     view_dir = np.array([0.0, 0.0, -1.0], dtype=np.float32)  # assuming camera looks along -Z
 
