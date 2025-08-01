@@ -53,7 +53,7 @@ def render_frame(
             )
             glow_material = gfx.PointsMaterial(
                 color_mode="vertex",
-                size=5.5,
+                size=4.5,
                 opacity=0.1,
             )
             glow_material.blending = "additive"

@@ -129,11 +129,11 @@ def get_global_bounds(folder):
         if fname.endswith(".hdf5"):
             with h5py.File(os.path.join(folder, fname), "r") as f:
                 coords = f["PartType0/Coordinates"][:]
-                min_all = np.minimum(min_all, coords.min(axis=0))
-                max_all = np.maximum(max_all, coords.max(axis=0))
                 energy = f["PartType0/InternalEnergies"][:]
                 min_en = min(min_en, energy.min())
                 max_en = max(max_en, energy.max())
+    min_all = np.array([100,200,150])
+    max_all= np.array([450,450,400])            
     return min_all, max_all, min_en, max_en
 
 
@@ -295,7 +295,7 @@ if __name__ == "__main__":
         bounds_max,
         globalmin_en,
         globalmax_en,
-        grid_size=(900, 900, 900),
+        grid_size=(800, 800, 800),
         interp_steps=1,
         blur_sigma=0.8
     )

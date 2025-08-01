@@ -62,7 +62,7 @@ def scale_colors_keep_ratio_numba(colors, scale_factor):
                 scaled_colors[i, j] = min(max(scaled[j], 0.0), 1.0)
     return scaled_colors
 
-def laplacian_smooth(mesh, iterations=8, lam=0.5):
+def laplacian_smooth(mesh, iterations=4, lam=0.2):
     verts = mesh.vertices.copy()
     adj = mesh.vertex_neighbors
     for _ in range(iterations):
@@ -126,13 +126,49 @@ def get_global_bounds(folder):
     for fname in sorted(os.listdir(folder)):
         if fname.endswith(".hdf5"):
             with h5py.File(os.path.join(folder, fname), "r") as f:
-                coords = f["PartType0/Coordinates"][:]
-                min_all = np.minimum(min_all, coords.min(axis=0))
-                max_all = np.maximum(max_all, coords.max(axis=0))
                 energy = f["PartType0/InternalEnergies"][:]
                 min_en = min(min_en, energy.min())
                 max_en = max(max_en, energy.max())
+    #print(min_all, max_all)
+    min_all = np.array([200,200,200])
+    max_all= np.array([450,450,400])
     return min_all, max_all, min_en, max_en
+
+
+def edge_blend_weights(grid_shape, padding_voxels):
+    """
+    Create a smooth blending weight mask for a 3D grid that fades from 1 inside
+    to 0 at the edges over the padding region.
+
+    Args:
+        grid_shape (tuple of int): Shape of the 3D grid (nx, ny, nz).
+        padding_voxels (int): Number of voxels over which to blend near edges.
+
+    Returns:
+        weights (np.ndarray): 3D array of shape grid_shape with values in [0,1].
+                              Values are 1 in the inner region and fade to 0 at edges.
+    """
+    nx, ny, nz = grid_shape
+
+    def fade1d(size):
+        """1D fade from 1 to 0 near edges over padding_voxels"""
+        w = np.ones(size, dtype=np.float32)
+        # Linear fade at start edge
+        w[:padding_voxels] = np.linspace(0, 1, padding_voxels, endpoint=False)
+        # Linear fade at end edge
+        w[-padding_voxels:] = np.linspace(1, 0, padding_voxels, endpoint=False)
+        return w
+
+    wx = fade1d(nx)
+    wy = fade1d(ny)
+    wz = fade1d(nz)
+
+    # Outer product to get 3D weights
+    weights = wx[:, None, None] * wy[None, :, None] * wz[None, None, :]
+
+    return weights
+
+
 
 def process_with_interpolated_marching_cubes_cpu(
     hdf5_folder, out_folder, bounds_min, bounds_max, globalmin_en, globalmax_en,
@@ -182,9 +218,11 @@ def process_with_interpolated_marching_cubes_cpu(
                 coarse_grid_size = tuple(coarse_grid_size)
                 coarse_dens_grid = pointcloud_to_grid_numba(
                     interp_pos, interp_dens, coarse_grid_size, bounds_min, bounds_max
-                )
-                coarse_dens_grid = gaussian_filter(coarse_dens_grid, sigma=1.0)
-                threshold = coarse_dens_grid.max() * 1e-5                
+                )#
+                #weights = edge_blend_weights(coarse_dens_grid.shape, padding_voxels)
+                #coarse_dens_grid *= weights
+                coarse_dens_grid = gaussian_filter(coarse_dens_grid, sigma=blur_sigma)
+                threshold = coarse_dens_grid.max() * 1e-3               
                 active_cells = np.argwhere(coarse_dens_grid > threshold)
                 print(f"Found {len(active_cells)} active coarse grid cells")
 
@@ -215,9 +253,10 @@ def process_with_interpolated_marching_cubes_cpu(
 
                     mask = np.all((interp_pos >= region_min) & (interp_pos <= region_max), axis=1)
                     
-                    if mask.sum() < 500:
+                    if mask.sum() < 50:
                         continue  # Skip sparse regions
                     print(f"Particles in region: {np.sum(mask)} / {interp_pos.shape[0]}")
+                    print(region_min,region_max)
                     local_pos = interp_pos[mask]
                     local_dens = interp_dens[mask]
                     local_ie = interp_ie[mask]
@@ -228,19 +267,31 @@ def process_with_interpolated_marching_cubes_cpu(
                     local_grid_size = tuple(grid_size)
 
                     dens_grid = pointcloud_to_grid_numba(local_pos, local_dens, local_grid_size, local_bounds_min, local_bounds_max)
+                    weights = edge_blend_weights(dens_grid.shape, padding_voxels)
+                    dens_grid *= weights
                     dens_grid = gaussian_filter(dens_grid, sigma=blur_sigma)
                     if dens_grid.max() <= 0:
                         continue
 
-                    print(f"Checking subgrid cell {cell}")
-                    print(f"Region min: {region_min}, Region max: {region_max}")
-                    mc_thresh = dens_grid.max() * 0.001
+                    #print(f"Checking subgrid cell {cell}")
+                    #print(f"Region min: {region_min}, Region max: {region_max}")
+                    global_max_dens = np.max(coarse_dens_grid)  # from the coarse step
+                    #print(np.max(coarse_dens_grid), np.min(coarse_dens_grid),np.mean(coarse_dens_grid))
+                    #print(np.max(dens_grid), np.min(dens_grid),np.mean(dens_grid),"fine grid")
+                    global_max_dens = np.max(coarse_dens_grid)
+                    coarse_volume = np.prod(coarse_grid_size)
+                    fine_volume = np.prod(grid_size)
+                    scale_ratio = fine_volume / coarse_volume
+
+                    mc_thresh = (global_max_dens * 0.001) / scale_ratio
+                    if mc_thresh < dens_grid.min() or mc_thresh > dens_grid.max():
+                        continue  # too sparse for surface, particles will default to halo
                     verts, faces, normals, _ = marching_cubes(dens_grid, level=mc_thresh)
                     grid_shape = np.array(local_grid_size)
                     scale = (local_bounds_max - local_bounds_min) / (grid_shape - 1)
                     verts_world = verts * scale + local_bounds_min
                     mesh = trimesh.Trimesh(vertices=verts_world, faces=faces, process=False)
-                    smoothed_mesh = laplacian_smooth(mesh, iterations=10, lam=0.4)
+                    smoothed_mesh = laplacian_smooth(mesh, iterations=6, lam=0.4)
 
                     verts_world = smoothed_mesh.vertices
                     faces = smoothed_mesh.faces
@@ -319,11 +370,12 @@ def process_with_interpolated_marching_cubes_cpu(
                     lit_color = base_color * diffuse[:, None] + specular[:, None]
 
                     # Emission (blackbody)
-                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 1.4625
+                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 3.4
+                    print(np.max(temperature_kelvin),np.min(temperature_kelvin),np.mean(temperature_kelvin))
                     raw_emission = get_blackbody_rgb_numba(temperature_kelvin)
                     emission_strength = np.clip(temperature_kelvin / 8000.0, 0.0, 1.0) ** 2
                     blackbody_emission = raw_emission * emission_strength[:, None]
-                    brightness_scale = 1.05
+                    brightness_scale = 1.00
                     # Combine lighting and emission
                     raw_color = lit_color + blackbody_emission
                     raw_color = np.clip(raw_color, 0.0, 1.0)
