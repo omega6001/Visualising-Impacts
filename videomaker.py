@@ -1,9 +1,8 @@
 import os
 from PIL import Image
 import subprocess
-input_folder = "frames_interp"
-output_folder = "frames_interp_renamed"
-os.makedirs(output_folder, exist_ok=True)
+input_folder = "rendered_frames"
+
 
 # Sort by file creation time or filename
 frame_files = sorted(os.listdir(input_folder))
@@ -18,12 +17,12 @@ os.chdir("rendered_frames")
 
 ffmpeg_cmd = [
     "ffmpeg",
-    "-framerate", "15",
+    "-framerate", "8",
     "-i", "frame_%04d.png",
     "-vf", "scale=1920:1080",
     "-c:v", "libx264",
     "-pix_fmt", "yuv420p",
-    "../output_colour_hot.mp4"
+    "../output_interptest.mp4"
 ]
 
 subprocess.run(ffmpeg_cmd, check=True)

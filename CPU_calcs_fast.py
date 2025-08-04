@@ -256,8 +256,9 @@ def process_with_interpolated_marching_cubes_cpu(
                 lit_color = base_color * diffuse[:, None] + specular[:, None] * np.array([1.0, 1.0, 1.0])
 
                 # === Emission (from blackbody)
-                temperature_kelvin = vertex_ie *(grid_size[0]**3)*1.4625 #assumes cube grid(equal boxes of L,W,H)
+                temperature_kelvin = vertex_ie *(1e8) #assumes cube grid(equal boxes of L,W,H) (grid_size[0]**3)*1.4625
                 ####1e8 for 400x400x400
+                print(np.max(temperature_kelvin),np.min(temperature_kelvin), np.mean(temperature_kelvin))
                 raw_emission = get_blackbody_rgb_numba(temperature_kelvin)
                 emission_strength = np.clip(temperature_kelvin / 8000.0, 0.0, 1.0) ** 2
                 blackbody_emission = raw_emission * emission_strength[:, None]
@@ -295,7 +296,7 @@ if __name__ == "__main__":
         bounds_max,
         globalmin_en,
         globalmax_en,
-        grid_size=(800, 800, 800),
+        grid_size=(400, 400, 400),
         interp_steps=1,
         blur_sigma=0.8
     )

@@ -7,6 +7,7 @@ from scipy.spatial import cKDTree
 import trimesh
 from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
+from scipy.interpolate import interp1d
 
 
 @njit(parallel=True)
@@ -91,16 +92,87 @@ def match_particles_numba(ids_a, ids_b):
             matched_idx_b.append(id_to_idx_b[pid])
     return np.array(matched_idx_a), np.array(matched_idx_b)
 
+@njit(parallel=True, fastmath=True)
+def batch_hermite_positions(pos_a, pos_b, vel_a, vel_b, dt, t_vals):
+    """
+    Compute Hermite positions for all particles and all t_vals.
+    pos_a, pos_b, vel_a, vel_b: (N, 3)
+    dt: scalar
+    t_vals: (M,)
+    Returns: positions (N, M, 3)
+    """
+    N = pos_a.shape[0]
+    M = t_vals.shape[0]
+    positions = np.zeros((N, M, 3), dtype=np.float64)
+    for i in prange(N):
+        p0 = pos_a[i]
+        p1 = pos_b[i]
+        v0 = vel_a[i]
+        v1 = vel_b[i]
+        for j in range(M):
+            t = t_vals[j]
+            t2 = t * t
+            t3 = t2 * t
+            h00 = 2*t3 - 3*t2 + 1
+            h10 = t3 - 2*t2 + t
+            h01 = -2*t3 + 3*t2
+            h11 = t3 - t2
+            positions[i, j, 0] = h00 * p0[0] + h10 * v0[0] * dt + h01 * p1[0] + h11 * v1[0] * dt
+            positions[i, j, 1] = h00 * p0[1] + h10 * v0[1] * dt + h01 * p1[1] + h11 * v1[1] * dt
+            positions[i, j, 2] = h00 * p0[2] + h10 * v0[2] * dt + h01 * p1[2] + h11 * v1[2] * dt
+    return positions
 
+@njit(parallel=True, fastmath=True)
+def compute_arc_lengths(positions):
+    """
+    Compute cumulative arc length along Hermite curve for each particle.
+    positions: (N, M, 3)
+    Returns: arc_lengths (N, M)
+    """
+    N, M, _ = positions.shape
+    arc_lengths = np.zeros((N, M), dtype=np.float64)
+    for i in prange(N):
+        total_length = 0.0
+        arc_lengths[i, 0] = 0.0
+        for j in range(1, M):
+            dx = positions[i, j, 0] - positions[i, j-1, 0]
+            dy = positions[i, j, 1] - positions[i, j-1, 1]
+            dz = positions[i, j, 2] - positions[i, j-1, 2]
+            dist = np.sqrt(dx*dx + dy*dy + dz*dz)
+            total_length += dist
+            arc_lengths[i, j] = total_length
+    return arc_lengths
 
-def hermite_interp_vec(p0, p1, v0, v1, t, dt):
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2 * t3 - 3 * t2 + 1
-    h10 = t3 - 2 * t2 + t
-    h01 = -2 * t3 + 3 * t2
-    h11 = t3 - t2
-    return (h00 * p0.T + h10 * dt * v0.T + h01 * p1.T + h11 * dt * v1.T).T
+@njit(parallel=True, fastmath=True)
+def get_uniform_reparam_indices(arc_lengths, n_uniform):
+    """
+    For each particle, find indices in arc_lengths that correspond to uniform arc-length spacing.
+    arc_lengths: (N, M)
+    n_uniform: scalar number of uniform points desired
+    Returns: indices (N, n_uniform) integer indices into arc_lengths positions
+    """
+    N, M = arc_lengths.shape
+    indices = np.zeros((N, n_uniform), dtype=np.int64)
+    for i in prange(N):
+        total_len = arc_lengths[i, M-1]
+        if total_len == 0.0:
+            # Degenerate case: just sample first position repeatedly
+            for u in range(n_uniform):
+                indices[i, u] = 0
+            continue
+        for u in range(n_uniform):
+            target_len = total_len * u / (n_uniform - 1) if n_uniform > 1 else 0.0
+            # Binary search for closest arc length index
+            low = 0
+            high = M - 1
+            while low < high:
+                mid = (low + high) // 2
+                if arc_lengths[i, mid] < target_len:
+                    low = mid + 1
+                else:
+                    high = mid
+            indices[i, u] = low
+    return indices
 
 @njit(parallel=True)
 def pointcloud_to_grid_numba(positions, values, grid_size, global_min, global_max):
@@ -206,13 +278,31 @@ def process_with_interpolated_marching_cubes_cpu(
             vel_a, vel_b = vel_a[idx_a], vel_b[idx_b]
             dens_a, dens_b = dens_a[idx_a], dens_b[idx_b]
             ie_a, ie_b = ie_a[idx_a], ie_b[idx_b]
+            
+            # Step 1: define fine sampling along Hermite curves
+            M = 50  # number of fine samples for arc length calculation
+            t_vals = np.linspace(0.0, 1.0, M)
 
+            # Step 2: compute batch Hermite positions (N particles x M samples x 3)
+            hermite_pos = batch_hermite_positions(pos_a, pos_b, vel_a, vel_b, dt, t_vals)
+
+            # Step 3: compute cumulative arc lengths along each curve
+            arc_lengths = compute_arc_lengths(hermite_pos)
+
+            # Step 4: find indices for uniform arc length spacing for interp_steps points
+            uniform_idx = get_uniform_reparam_indices(arc_lengths, interp_steps)
+
+            N = pos_a.shape[0]
+
+            # Step 5: for each interpolation step, gather interpolated positions directly
             for s in range(interp_steps):
-                t = s / interp_steps
-                interp_pos = hermite_interp_vec(pos_a, pos_b, vel_a, vel_b, t, dt)
+                interp_pos = hermite_pos[np.arange(N), uniform_idx[:, s]]
+
+                t = s / (interp_steps - 1) if interp_steps > 1 else 0.0
+                # Now interpolate scalar fields linearly as before
                 interp_dens = (1 - t) * dens_a + t * dens_b
                 interp_ie = (1 - t) * ie_a + t * ie_b
-
+    # (halo_temperature_kelvin, marching cubes, saving .npz, etc.)
                 halo_temperature_kelvin = interp_ie * 1.5e9
                 print(max(halo_temperature_kelvin), min(halo_temperature_kelvin), np.mean(halo_temperature_kelvin))
                 halo_colors = get_blackbody_rgb_numba(halo_temperature_kelvin)
@@ -236,8 +326,6 @@ def process_with_interpolated_marching_cubes_cpu(
                     print(f"Using global marching cubes threshold: {global_thresh:.6e}")
 
                 active_cells = np.argwhere(coarse_dens_grid > np.max(coarse_dens_grid) * 0.001)
-
-                from concurrent.futures import ThreadPoolExecutor
 
                 def process_cell(cell):
                     cx, cy, cz = cell
@@ -325,11 +413,11 @@ def process_with_interpolated_marching_cubes_cpu(
                     dot_rv = np.einsum('ij,j->i', reflect_dir, view_dir)
                     specular = np.clip(dot_rv, 0.0, 1.0) ** 12
                     specular *= 0.6 * facing_light
+                    ambient_color = np.full((verts.shape[0], 3), 0.15, dtype=np.float32)  # You can tweak 0.1 to control intensity
+                    base_color = np.full((verts.shape[0], 3), 0.35, dtype=np.float32)
+                    lit_color = ambient_color + base_color * diffuse[:, None] + specular[:, None]
 
-                    base_color = np.full((verts.shape[0], 3), 0.4, dtype=np.float32)
-                    lit_color = base_color * diffuse[:, None] + specular[:, None]
-
-                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 1300
+                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 3500
                     print(max(temperature_kelvin), min(temperature_kelvin), np.mean(temperature_kelvin))
                     raw_emission = get_blackbody_rgb_numba(temperature_kelvin)
                     emission_strength = np.clip(temperature_kelvin / 8000.0, 0.0, 1.0) ** 2
@@ -345,7 +433,7 @@ def process_with_interpolated_marching_cubes_cpu(
                 all_verts, all_faces, all_normals = [], [], []
                 all_local_pos, all_vertex_ie = [], []
                 all_local_colors, all_vertex_blackbody_color = [], []
-
+                from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor() as executor:
                     results = list(executor.map(process_cell, active_cells))
 
@@ -390,7 +478,6 @@ def process_with_interpolated_marching_cubes_cpu(
 
 
 
-
                                    
                 
 if __name__ == "__main__":
@@ -409,5 +496,5 @@ if __name__ == "__main__":
         coarse_grid_size=(10, 10, 10),  # Coarse global scan
         interp_steps=5,
         blur_sigma=1.2,
-        padding_voxels=12                   # Padding to reduce continuity artifacts
+        padding_voxels=8                   # Padding to reduce continuity artifacts
 )
