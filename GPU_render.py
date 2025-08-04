@@ -7,8 +7,8 @@ from scipy.spatial import cKDTree
 
 
 # Camera configuration
-campos = np.array([320, 320, 420], dtype=np.float32)
-lookat = np.array([320, 320, 320], dtype=np.float32)
+campos = np.array([320, 320, 400], dtype=np.float32)
+lookat = np.array([320,320,320], dtype=np.float32)
 
 
 def init_renderer(img_size=(1920, 1080)):
@@ -53,8 +53,8 @@ def render_frame(
             )
             glow_material = gfx.PointsMaterial(
                 color_mode="vertex",
-                size=4.5,
-                opacity=0.1,
+                size=1,
+                opacity=0,
             )
             glow_material.blending = "additive"
             glow_material.depth_test = True
@@ -76,7 +76,7 @@ def render_frame(
         print(f"Failed to save image: {e}")
 
 
-def main(mesh_folder="meshes_interpolated/", output_folder="rendered_frames/", limit=None):
+def main(mesh_folder="meshes_interpolated2/", output_folder="rendered_frames2/", limit=None):
     os.makedirs(output_folder, exist_ok=True)
     files = sorted([f for f in os.listdir(mesh_folder) if f.endswith('.npz')])
 
