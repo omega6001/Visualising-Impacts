@@ -53,12 +53,12 @@ def render_frame(
             )
             glow_material = gfx.PointsMaterial(
                 color_mode="vertex",
-                size=1,
-                opacity=0,
+                size=5.5,
+                opacity=0.05,
             )
             glow_material.blending = "additive"
             glow_material.depth_test = True
-            glow_material.depth_write = False
+            glow_material.depth_write = True
 
             glow = gfx.Points(glow_geometry, glow_material)
             scene.add(glow)
@@ -76,7 +76,7 @@ def render_frame(
         print(f"Failed to save image: {e}")
 
 
-def main(mesh_folder="meshes_interpolated2/", output_folder="rendered_frames2/", limit=None):
+def main(mesh_folder="meshes_interpolated/", output_folder="rendered_frames/", limit=None):
     os.makedirs(output_folder, exist_ok=True)
     files = sorted([f for f in os.listdir(mesh_folder) if f.endswith('.npz')])
 

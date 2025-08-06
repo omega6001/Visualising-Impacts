@@ -17,7 +17,7 @@ os.chdir("rendered_frames")
 
 ffmpeg_cmd = [
     "ffmpeg",
-    "-framerate", "8",
+    "-framerate", "15",
     "-i", "frame_%04d.png",
     "-vf", "scale=1920:1080",
     "-c:v", "libx264",

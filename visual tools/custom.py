@@ -15,7 +15,7 @@ scene = gfx.Scene()
 scene.add(gfx.DirectionalLight((light_dir)))
 
 
-with h5py.File("data/earth_impact_0000.hdf5",'r') as f:
+with h5py.File("impact_5e5_ice_0000.hdf5",'r') as f:
     pos = f["PartType0/Coordinates"][:].astype(np.float32)
     dens = f["PartType0/Densities"][:].astype(np.float32)
 
