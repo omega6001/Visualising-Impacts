@@ -255,7 +255,7 @@ def process_with_interpolated_marching_cubes_cpu(
     frame_counter = 0
 
     #global_thresh = None  # Initialize global threshold
-
+    meshable_region_cache = {}
     for frame_idx in range(len(files) - 1):
         fname_a, fname_b = files[frame_idx], files[frame_idx + 1]
         print(f"Interpolating between {fname_a} and {fname_b}")
@@ -364,12 +364,30 @@ def process_with_interpolated_marching_cubes_cpu(
                     weights = edge_blend_weights(dens_grid.shape, padding_voxels)
                     dens_grid *= weights
                     dens_grid = gaussian_filter(dens_grid, sigma=blur_sigma)
+                    region_key = (cx, cy, cz)  # Unique key for the current region
+                    region_density = dens_grid.max()
+                    # Define hysteresis bounds
+                    lower_thresh = global_thresh * 1
+                    upper_thresh = global_thresh * 1.2
 
-                    if dens_grid.max() < global_thresh: #####needs to return only halo particles
-                        # Return only the halo data if no surface can be extracted
+                    # Check previous state
+                    was_meshable = meshable_region_cache.get(region_key, None)
+
+                    if region_density >= upper_thresh:
+                        meshable = True
+                    elif region_density <= lower_thresh:
+                        meshable = False
+                    elif was_meshable is None:
+                    # First time seeing this region → allow it
+                        meshable = True
+                    else:
+                        meshable = was_meshable  # Retain previous state if within hysteresis band
+
+                    meshable_region_cache[region_key] = meshable  # Update cache
+
+                    if not meshable:
                         return None, None, None, halo_pos, None, halo_colors_out, None
-
-
+                    
                     verts, faces, normals, _ = marching_cubes(dens_grid, level=global_thresh)
                     scale = (region_max - region_min) / (np.array(grid_size) - 1)
                     verts_world = verts * scale + region_min
@@ -489,10 +507,10 @@ def process_with_interpolated_marching_cubes_cpu(
                                    
                 
 if __name__ == "__main__":
-    input_folder = "outs/"
+    input_folder = "snaps_better/"
     output_folder = "meshes_interpolated/"
     bounds_min, bounds_max, globalmin_en, globalmax_en, dense_max = get_global_bounds(input_folder)
-    global_thresh = dense_max*0.01 #for 10^6 this is 1.382e-5 (or 0.001*)#dense_max*0.001
+    global_thresh = dense_max*0.0002 #for 10^6 this is 1.382e-5 (or 0.001*)#dense_max*0.001
 
     process_with_interpolated_marching_cubes_cpu(
         input_folder,
@@ -504,7 +522,7 @@ if __name__ == "__main__":
         global_thresh,
         grid_size=(400,400, 400),         # High-res per region
         coarse_grid_size=(10, 10, 10),  # Coarse global scan
-        interp_steps=1,
+        interp_steps=10,
         blur_sigma=1.2,
-        padding_voxels=12                   # Padding to reduce continuity artifacts
+        padding_voxels=16                  # Padding to reduce continuity artifacts
 )

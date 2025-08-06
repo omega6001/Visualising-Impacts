@@ -2,9 +2,9 @@ import os
 from PIL import Image
 import subprocess
 
-left_folder = "VR tools/rendered_frames/left_eye"
-right_folder = "VR tools/rendered_frames/right_eye"
-combined_folder = "VR tools/rendered_frames/vr_sbs"
+left_folder = "VR_tools/rendered_frames/left_eye"
+right_folder = "VR_tools/rendered_frames/right_eye"
+combined_folder = "VR_tools/rendered_frames/vr_sbs"
 os.makedirs(combined_folder, exist_ok=True)
 
 # Assumes filenames like frame_0000.png, frame_0001.png, ...
@@ -41,13 +41,19 @@ os.chdir(combined_folder)
 
 ffmpeg_cmd = [
     "ffmpeg",
-    "-framerate", "10",  # You can adjust frame rate
-    "-i", "frame_%04d.png",
-    "-vf", "scale=3840:1080",  # 2x width for side-by-side 1080p per eye
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "../output_vr_sbs50.mp4"
+    "-y",                        # overwrite output if it exists
+    "-framerate", "10",          # same as before
+    "-i", "frame_%04d.png",      # input PNG sequence
+    "-vf",
+    "setsar=1,"                                      # square pixels
+    "v360=in=e:out=e:"                               # treat input as flat pano → output equirectangular
+    "fov_out_h=180:fov_out_v=180,"                   # crop to 180°×180° FOV
+    "pad=3840:1080:(ow-iw)/2:(oh-ih)/2:black",       # letter-box back to 3840×1080
+    "-c:v", "libx264",          # same codec
+    "-metadata:s:v:0", "stereo_mode=mono",  # tag as mono-180
+    "-pix_fmt", "yuv420p",      # same pixel format
+    "../output_vr180.mp4"        # your new VR 180 target
 ]
 
 subprocess.run(ffmpeg_cmd, check=True)
-print("VR (SBS) video created: output_vr_sbs50.mp4")
+print("VR (SBS) video created: output_vr_sbs5.mp4")

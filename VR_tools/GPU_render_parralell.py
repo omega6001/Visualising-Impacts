@@ -3,27 +3,40 @@ import numpy as np
 import pygfx as gfx
 from wgpu.gui.offscreen import WgpuCanvas
 from PIL import Image
-from scipy.spatial import cKDTree
+import math
+import pylinalg as la  # add this import near the top
 
-lookat = np.array([320, 320, 320], dtype=np.float32)
 
-def init_renderer(campos, img_size=(1920, 1080)):
+def rotate_vec_x_neg90(v):
+    # v is (3,) numpy array
+    rx = np.array([
+        [1, 0, 0],
+        [0, 0, 1],
+        [0, -1, 0]
+    ], dtype=np.float32)
+    return rx @ v
+
+def init_renderer(campos, lookat, img_size=(3840, 1920)):
     canvas = WgpuCanvas(size=img_size, pixel_ratio=1)
     renderer = gfx.renderers.WgpuRenderer(canvas)
     scene = gfx.Scene()
 
+    root = gfx.Group()
+    root.local.rotation = la.quat_from_euler((-np.pi / 2, 0, 0))  # rotate scene -90° X
+    scene.add(root)
+
     camera = gfx.PerspectiveCamera(60, img_size[0] / img_size[1])
+
     camera.local.position = campos
     camera.look_at(lookat)
 
-    return canvas, renderer, scene, camera
+    return canvas, renderer, scene, camera, root
 
 def chunk_data(verts, faces, colors, max_faces=100000):
     chunks = []
     num_faces = faces.shape[0]
     for i in range(0, num_faces, max_faces):
         f = faces[i:i+max_faces]
-        # Get unique vertices used in this face batch
         unique_indices, inverse_indices = np.unique(f.flatten(), return_inverse=True)
         verts_chunk = verts[unique_indices]
         colors_chunk = colors[unique_indices]
@@ -31,7 +44,7 @@ def chunk_data(verts, faces, colors, max_faces=100000):
         chunks.append((verts_chunk, faces_chunk, colors_chunk))
     return chunks
 
-def render_glow_particles(scene, positions, colors, chunk_size=200_000):
+def render_glow_particles(root, positions, colors, chunk_size=200_000):
     for i in range(0, len(positions), chunk_size):
         pos_chunk = positions[i:i+chunk_size]
         col_chunk = colors[i:i+chunk_size]
@@ -48,16 +61,16 @@ def render_glow_particles(scene, positions, colors, chunk_size=200_000):
         glow_material.depth_test = True
         glow_material.depth_write = True
         glow = gfx.Points(glow_geometry, glow_material)
-        scene.add(glow)
+        root.add(glow)
 
 def render_frame(
-    canvas, renderer, scene, camera,
+    canvas, renderer, scene, camera, root,
     verts_world, faces, halo_positions, mesh_normals,
-    vertex_colors, output_path,halo_colors=None
+    vertex_colors, output_path, halo_colors=None
 ):
-    # Clear previous objects (keep light)
-    for obj in scene.children:
-        scene.remove(obj)
+    # Clear previous objects inside root, not scene
+    for obj in root.children[:]:
+        root.remove(obj)
 
     mesh_chunks = chunk_data(verts_world, faces, vertex_colors)
     for verts_chunk, faces_chunk, colors_chunk in mesh_chunks:
@@ -68,32 +81,31 @@ def render_frame(
         )
         material = gfx.MeshBasicMaterial(color_mode="vertex")
         mesh = gfx.Mesh(geometry, material)
-        scene.add(mesh)
-    # --- Add glow particles ---
+        root.add(mesh)  # add to root
+
     if halo_positions is not None and len(halo_positions) > 0 and halo_colors is not None:
         if len(halo_positions) != len(halo_colors):
             print("Mismatch between halo_positions and halo_colors. Skipping glow.")
         else:
-            render_glow_particles(scene, halo_positions, halo_colors)
+            render_glow_particles(root, halo_positions, halo_colors)  # add to root
 
+    renderer.render(scene, camera)
+    image = canvas.draw()
 
-        # --- Render and save image ---
-        renderer.render(scene, camera)
-        image = canvas.draw()
-
-        try:
-            image_data = np.asarray(image)
-            Image.fromarray(image_data, mode="RGBA").save(output_path)
-            print(f"Saved frame to {output_path}")
-        except Exception as e:
-            print(f"Failed to save image: {e}")
-
+    try:
+        image_data = np.asarray(image)
+        Image.fromarray(image_data, mode="RGBA").save(output_path)
+        print(f"Saved frame to {output_path}")
+    except Exception as e:
+        print(f"Failed to save image: {e}")
 
 def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", dx=10.0, limit=None):
     eyes = {
         "left_eye": -dx,
         "right_eye": dx
     }
+
+    original_lookat = np.array([315, 315, 315], dtype=np.float32)
 
     for eye, offset in eyes.items():
         output_folder = os.path.join(output_base, eye)
@@ -103,8 +115,13 @@ def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", d
         if limit is not None:
             files = files[:limit]
 
-        campos = np.array([240, 320, 320+ offset], dtype=np.float32)
-        canvas, renderer, scene, camera = init_renderer(campos)
+        original_campos = np.array([315+offset,220,340], dtype=np.float32)
+    
+        # Rotate camera and lookat vectors to match root rotation
+        campos = rotate_vec_x_neg90(original_campos)
+        lookat = rotate_vec_x_neg90(original_lookat)
+
+        canvas, renderer, scene, camera, root = init_renderer(campos, lookat)
 
         for idx, filename in enumerate(files):
             print(f"Rendering {eye} frame {idx} from {filename}")
@@ -120,16 +137,15 @@ def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", d
             output_path = os.path.join(output_folder, output_file)
 
             render_frame(
-                canvas, renderer, scene, camera,
+                canvas, renderer, scene, camera, root,
                 verts, faces, halo_positions, normals,
                 vertex_colors, output_path, halo_colors
             )
 
 if __name__ == "__main__":
-    # Hardcoded config (change these as needed)
     mesh_folder = "meshes_interpolated/"
-    output_folder = "VR tools/rendered_frames/"
-    dx = 20.0
-    limit = None  # e.g. 50
+    output_folder = "VR_tools/rendered_frames/"
+    dx = 5
+    limit = None
 
     main(mesh_folder, output_folder, dx, limit)
