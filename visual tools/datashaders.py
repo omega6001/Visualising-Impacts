@@ -8,8 +8,13 @@ import subprocess
 from glob import glob
 from matplotlib.colors import LinearSegmentedColormap
 
+#some code that produces a 2D version of the visuals, can be nice to look at and see the cores during collisions
+#runs entirely headless
+
+
+
 # === CONFIGURATION ===
-HDF5_GLOB = "outs/*.hdf5"  # <-- UPDATE THIS
+HDF5_GLOB = "outs/*.hdf5"  #input folder
 FRAME_DIR = "frames"
 VIDEO_FILE = "output.mp4"
 FRAMERATE = 10

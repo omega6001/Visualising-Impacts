@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import time
 
 
-
+#this code is helpful for visualising your first file so you know camera postions, lookat vectors etc
 
 
 with h5py.File("outs/impact1e6_0000.hdf5",'r') as f:

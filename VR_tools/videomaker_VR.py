@@ -10,7 +10,7 @@ os.makedirs(combined_folder, exist_ok=True)
 # Assumes filenames like frame_0000.png, frame_0001.png, ...
 frame_files = sorted(os.listdir(left_folder))
 
-# Step 1: Combine left/right images side-by-side
+# Combines left/right images side-by-side
 for fname in frame_files:
     if fname.endswith(".png"):
         left_path = os.path.join(left_folder, fname)
@@ -36,24 +36,17 @@ for fname in frame_files:
 
 print("Combined stereo image sequence saved.")
 
-# Step 2: Render video using FFmpeg
+# Render video using FFmpeg
 os.chdir(combined_folder)
 
 ffmpeg_cmd = [
     "ffmpeg",
-    "-y",                        # overwrite output if it exists
-    "-framerate", "10",          # same as before
-    "-i", "frame_%04d.png",      # input PNG sequence
-    "-vf",
-    "setsar=1,"                                      # square pixels
-    "v360=in=e:out=e:"                               # treat input as flat pano → output equirectangular
-    "fov_out_h=180:fov_out_v=180,"                   # crop to 180°×180° FOV
-    "pad=3840:1080:(ow-iw)/2:(oh-ih)/2:black",       # letter-box back to 3840×1080
-    "-c:v", "libx264",          # same codec
-    "-metadata:s:v:0", "stereo_mode=mono",  # tag as mono-180
-    "-pix_fmt", "yuv420p",      # same pixel format
-    "../output_vr180.mp4"        # your new VR 180 target
+    "-framerate", "36",  # 36 FPS
+    "-i", "frame_%04d.png",  # Input SBS frames
+    "-vf", "scale=7680:1920",  # Full SBS resolution
+    "-c:v", "libx264",
+    "-pix_fmt", "yuv420p",
+    "../../output_vr_sbs_7680x1920_36fps2.5.mp4" # name of output file
 ]
-
 subprocess.run(ffmpeg_cmd, check=True)
 print("VR (SBS) video created: output_vr_sbs5.mp4")

@@ -4,9 +4,10 @@ import pygfx as gfx
 from wgpu.gui.offscreen import WgpuCanvas
 from PIL import Image
 import math
-import pylinalg as la  # add this import near the top
+import pylinalg as la 
+import h5py
 
-
+#defines the rotation matrix so that collision happens towards viewer (more interesting to see)
 def rotate_vec_x_neg90(v):
     # v is (3,) numpy array
     rx = np.array([
@@ -25,14 +26,14 @@ def init_renderer(campos, lookat, img_size=(3840, 1920)):
     root.local.rotation = la.quat_from_euler((-np.pi / 2, 0, 0))  # rotate scene -90° X
     scene.add(root)
 
-    camera = gfx.PerspectiveCamera(60, img_size[0] / img_size[1])
+    camera = gfx.PerspectiveCamera(60, img_size[0] / img_size[1])#60FOV 16:9 aspect ratio camera
 
     camera.local.position = campos
     camera.look_at(lookat)
 
     return canvas, renderer, scene, camera, root
 
-def chunk_data(verts, faces, colors, max_faces=100000):
+def chunk_data(verts, faces, colors, max_faces=100000): #splits data into chunks for renderer to handle better
     chunks = []
     num_faces = faces.shape[0]
     for i in range(0, num_faces, max_faces):
@@ -52,12 +53,13 @@ def render_glow_particles(root, positions, colors, chunk_size=200_000):
             positions=pos_chunk.astype(np.float32),
             colors=col_chunk.astype(np.float32)
         )
+        #defines glow halo particles, low opacity and larger size is generally better
         glow_material = gfx.PointsMaterial(
             color_mode="vertex",
             size=5.5,
-            opacity=0.02,
+            opacity=0.04,
         )
-        glow_material.blending = "alpha"
+        glow_material.blending = "additive" #can change this to alpha for different look
         glow_material.depth_test = True
         glow_material.depth_write = True
         glow = gfx.Points(glow_geometry, glow_material)
@@ -68,7 +70,7 @@ def render_frame(
     verts_world, faces, halo_positions, mesh_normals,
     vertex_colors, output_path, halo_colors=None
 ):
-    # Clear previous objects inside root, not scene
+    # Clear previous objects inside root
     for obj in root.children[:]:
         root.remove(obj)
 
@@ -79,7 +81,7 @@ def render_frame(
             indices=faces_chunk.astype(np.uint32),
             colors=colors_chunk.astype(np.float32)
         )
-        material = gfx.MeshBasicMaterial(color_mode="vertex")
+        material = gfx.MeshBasicMaterial(color_mode="vertex")#renders as a basic mesh for custom lighting
         mesh = gfx.Mesh(geometry, material)
         root.add(mesh)  # add to root
 
@@ -99,13 +101,16 @@ def render_frame(
     except Exception as e:
         print(f"Failed to save image: {e}")
 
-def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", dx=10.0, limit=None):
+def main(mesh_folder="meshes_interpolated/", output_base="rendered_frames/", dx=2.5, limit=None):
     eyes = {
         "left_eye": -dx,
         "right_eye": dx
     }
-
-    original_lookat = np.array([315, 315, 315], dtype=np.float32)
+    
+    with h5py.File("outs/impact1e6_0000.hdf5",'r') as f:
+        pos = f["PartType0/Coordinates"][:]
+    original_lookat = np.array([np.mean(pos[:][0]),np.mean(pos[:][1]),np.mean(pos[:][2])], dtype=np.float32)
+    print("looking at: " + str(original_lookat))
 
     for eye, offset in eyes.items():
         output_folder = os.path.join(output_base, eye)
@@ -115,7 +120,7 @@ def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", d
         if limit is not None:
             files = files[:limit]
 
-        original_campos = np.array([315+offset,220,340], dtype=np.float32)
+        original_campos = np.array([315+offset,220,340], dtype=np.float32)# this is probably easiest to pick yourself from the lookat vector
     
         # Rotate camera and lookat vectors to match root rotation
         campos = rotate_vec_x_neg90(original_campos)
@@ -132,6 +137,7 @@ def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", d
             halo_positions = data['halo_positions']
             halo_colors = data.get('halo_blackbody_color', None)
             vertex_colors = data['vertex_blackbody_color']
+            #loads all the data
 
             output_file = f"frame_{idx:04d}.png"
             output_path = os.path.join(output_folder, output_file)
@@ -145,7 +151,7 @@ def main(mesh_folder="meshes_interpolated3/", output_base="rendered_frames3/", d
 if __name__ == "__main__":
     mesh_folder = "meshes_interpolated/"
     output_folder = "VR_tools/rendered_frames/"
-    dx = 5
-    limit = None
+    dx = 2.5 #so far this is the best value found
+    limit = None# can choose to only render certain number of frames
 
     main(mesh_folder, output_folder, dx, limit)

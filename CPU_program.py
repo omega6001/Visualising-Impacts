@@ -1,4 +1,4 @@
-import os
+import os                                   #note some of these imports could be redundant by this version, however it seems easier to keep them in for now
 import h5py
 import numpy as np
 from skimage.measure import marching_cubes
@@ -9,7 +9,7 @@ from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from scipy.interpolate import interp1d
 
-
+#this function takes in the 'temperature' and spits out the blackbody emission colour (with a bit of scaling for visual effects)
 @njit(parallel=True)
 def get_blackbody_rgb_numba(T_kelvin):
     T = np.clip(T_kelvin, 1000.0, 40000.0)
@@ -47,7 +47,7 @@ def get_blackbody_rgb_numba(T_kelvin):
 
     rgb = np.stack((r, g, b), axis=-1) / 255.0
     return rgb.astype(np.float32)
-
+#used to scale the colours while keeping the ratios between R,G,B this avoids the problem of lit areas turning more towards the strongest channel
 @njit(parallel=True)
 def scale_colors_keep_ratio_numba(colors, scale_factor):
     n = colors.shape[0]
@@ -63,7 +63,7 @@ def scale_colors_keep_ratio_numba(colors, scale_factor):
             for j in range(3):
                 scaled_colors[i, j] = min(max(scaled[j], 0.0), 1.0)
     return scaled_colors
-
+#laplacian smoothing helps reduce the 'blocky' look of the mesh, iterates over the mesh taking the average between neighbours to redefine a new mesh
 def laplacian_smooth(mesh, iterations=4, lam=0.2):
     verts = mesh.vertices.copy()
     adj = mesh.vertex_neighbors
@@ -76,7 +76,7 @@ def laplacian_smooth(mesh, iterations=4, lam=0.2):
             new_verts[i] = verts[i] + lam * (avg - verts[i])
         verts = new_verts
     return trimesh.Trimesh(vertices=verts, faces=mesh.faces, process=False)
-
+#this matches the particles in each file to each other for interpolation
 @njit
 def match_particles_numba(ids_a, ids_b):
     id_to_idx_b = {}
@@ -91,7 +91,7 @@ def match_particles_numba(ids_a, ids_b):
             matched_idx_a.append(idx_a)
             matched_idx_b.append(id_to_idx_b[pid])
     return np.array(matched_idx_a), np.array(matched_idx_b)
-
+#this is a vectorised version of hermite interpolation used for circular motion.
 @njit(parallel=True, fastmath=True)
 def batch_hermite_positions(pos_a, pos_b, vel_a, vel_b, dt, t_vals):
     """
@@ -121,7 +121,9 @@ def batch_hermite_positions(pos_a, pos_b, vel_a, vel_b, dt, t_vals):
             positions[i, j, 1] = h00 * p0[1] + h10 * v0[1] * dt + h01 * p1[1] + h11 * v1[1] * dt
             positions[i, j, 2] = h00 * p0[2] + h10 * v0[2] * dt + h01 * p1[2] + h11 * v1[2] * dt
     return positions
-
+#this and the function below are designed to reduce the errors from hermite interpolation where the positions wwould get calculated too far into
+#the path for each interpolation step. this caused the bodies to seem like they speed up and slow down at the start and end of each frame respectively.
+#this works by finding equally spaced points along the arc path of each particle
 @njit(parallel=True, fastmath=True)
 def compute_arc_lengths(positions):
     """
@@ -142,7 +144,7 @@ def compute_arc_lengths(positions):
             total_length += dist
             arc_lengths[i, j] = total_length
     return arc_lengths
-
+#see above comment
 @njit(parallel=True, fastmath=True)
 def get_uniform_reparam_indices(arc_lengths, n_uniform):
     """
@@ -173,7 +175,7 @@ def get_uniform_reparam_indices(arc_lengths, n_uniform):
                     high = mid
             indices[i, u] = low
     return indices
-
+# this really just does what it says in the name, takes positions of particles and detects which grid cell its in, then encodes the densities to the grid
 @njit(parallel=True)
 def pointcloud_to_grid_numba(positions, values, grid_size, global_min, global_max):
     grid = np.zeros(grid_size, dtype=np.float32)
@@ -189,7 +191,10 @@ def pointcloud_to_grid_numba(positions, values, grid_size, global_min, global_ma
     return grid
 
 
-
+#this function is mostly redundant, but ive found is really useful for bugfixing and fine tuning temp scaling
+#finds the max and mins of internal energy and density (used in threshold for marching cubes)
+#at some point this was used to find the max and min positions for drawing the grid, however this lead to very large scales from very distant particles,
+#depending on the simulation it is sometimes easier to just input the bounds you want to use using some of the visual tools
 def get_global_bounds(folder):
     min_all = np.full(3, np.inf)
     max_all = np.full(3, -np.inf)
@@ -204,12 +209,11 @@ def get_global_bounds(folder):
                 min_en = min(min_en, energy.min())
                 max_en = max(max_en, energy.max())
                 max_density = max(max_density, dens.max())
-    #print(min_all, max_all)
     min_all = np.array([250,250,250])
     max_all= np.array([400,400,400])
     return min_all, max_all, min_en, max_en, max_density
 
-
+#blending for padding cells, chatGPT's code comments explain this better than I could
 def edge_blend_weights(grid_shape, padding_voxels):
     """
     Create a smooth blending weight mask for a 3D grid that fades from 1 inside
@@ -244,18 +248,17 @@ def edge_blend_weights(grid_shape, padding_voxels):
     return weights
 
 
-
+#the main body of processing
 def process_with_interpolated_marching_cubes_cpu(
     hdf5_folder, out_folder, bounds_min, bounds_max, globalmin_en, globalmax_en, global_thresh=0.001,
-    grid_size=(900, 900, 900), coarse_grid_size=(100, 100, 100), interp_steps=1,
+    grid_size=(400, 400, 400), coarse_grid_size=(10, 10, 10), interp_steps=5,
     blur_sigma=0.5, padding_voxels=8
 ):
     os.makedirs(out_folder, exist_ok=True)
     files = sorted([f for f in os.listdir(hdf5_folder) if f.endswith('.hdf5')])
     frame_counter = 0
 
-    #global_thresh = None  # Initialize global threshold
-    meshable_region_cache = {}
+    meshable_region_cache = {} #defines an empty cache so each part has to prove it can be meshed rather than giving an error when it can't
     for frame_idx in range(len(files) - 1):
         fname_a, fname_b = files[frame_idx], files[frame_idx + 1]
         print(f"Interpolating between {fname_a} and {fname_b}")
@@ -270,7 +273,7 @@ def process_with_interpolated_marching_cubes_cpu(
             ids_b = fb['PartType0/ParticleIDs'][:]
             pos_b, vel_b = fb['PartType0/Coordinates'][:], fb['PartType0/Velocities'][:]
             dens_b, ie_b = fb['PartType0/Densities'][:], fb['PartType0/InternalEnergies'][:]
-
+            #reads in the necessary parts of each file for interpolation and colouring
             time_a = fa.attrs.get('Time', 0.0)
             time_b = fb.attrs.get('Time', 1.0)
             dt = time_b - time_a
@@ -280,33 +283,32 @@ def process_with_interpolated_marching_cubes_cpu(
             vel_a, vel_b = vel_a[idx_a], vel_b[idx_b]
             dens_a, dens_b = dens_a[idx_a], dens_b[idx_b]
             ie_a, ie_b = ie_a[idx_a], ie_b[idx_b]
-            
-            # Step 1: define fine sampling along Hermite curves
+            #matches the particles for interpolation use
             M = 150  # number of fine samples for arc length calculation
             t_vals = np.linspace(0.0, 1.0, M)
 
-            # Step 2: compute batch Hermite positions (N particles x M samples x 3)
+            #computes the positions for each particle
             hermite_pos = batch_hermite_positions(pos_a, pos_b, vel_a, vel_b, dt, t_vals)
 
-            # Step 3: compute cumulative arc lengths along each curve
+            # finds the total arc length for each curve
             arc_lengths = compute_arc_lengths(hermite_pos)
 
-            # Step 4: find indices for uniform arc length spacing for interp_steps points
+            # finds the indices needed for a uniform spacing between points
             uniform_idx = get_uniform_reparam_indices(arc_lengths, interp_steps)
 
             N = pos_a.shape[0]
 
-            # Step 5: for each interpolation step, gather interpolated positions directly
             for s in range(interp_steps-1):
                 interp_pos = hermite_pos[np.arange(N), uniform_idx[:, s]]
 
                 t = s / (interp_steps - 1) if interp_steps > 1 else 0.0
                 # Now interpolate scalar fields linearly as before
+                #scalar fields are interpolated linearly between frames (usually similar enough for this to be ok)
                 interp_dens = (1 - t) * dens_a + t * dens_b
                 interp_ie = (1 - t) * ie_a + t * ie_b
-                # (halo_temperature_kelvin, marching cubes, saving .npz, etc.)
+                # scales halo temperatures to fit blackbody emission scales
                 halo_temperature_kelvin = interp_ie * 1.0e9
-                #print(max(halo_temperature_kelvin), min(halo_temperature_kelvin), np.mean(halo_temperature_kelvin))
+                #print(max(halo_temperature_kelvin), min(halo_temperature_kelvin), np.mean(halo_temperature_kelvin)) #useful for bugfixing/changing visual
                 halo_colors = get_blackbody_rgb_numba(halo_temperature_kelvin)
                 halo_colors = np.clip(scale_colors_keep_ratio_numba(halo_colors,1.0), 0, 1)
 
@@ -314,22 +316,18 @@ def process_with_interpolated_marching_cubes_cpu(
                 grid_indices = np.clip(grid_indices, 0, np.array(coarse_grid_size) - 1)
                 flat_indices = grid_indices[:, 0] * coarse_grid_size[1] * coarse_grid_size[2] + \
                                grid_indices[:, 1] * coarse_grid_size[2] + grid_indices[:, 2]
-
+                #defines the coarse i.e (10x10x10) grid
                 coarse_dens_grid = pointcloud_to_grid_numba(
                     interp_pos, interp_dens, coarse_grid_size, bounds_min, bounds_max
                 )
+                #gaussian blur can make things seem less blocky again
                 coarse_dens_grid = gaussian_filter(coarse_dens_grid, sigma=blur_sigma)
 
-                #coarse_volume = np.prod(coarse_grid_size)
-                #fine_volume = np.prod(grid_size)
-                #scale_ratio = fine_volume / coarse_volume
-                #global_thresh = (np.max(coarse_dens_grid) * 0.001) / scale_ratio
-                #global_thresh = global_thresh / scale_ratio
-                print(f"Using global marching cubes threshold: {global_thresh:.6e}")
+                print(f"Using global marching cubes threshold: {global_thresh:.6e}")#useful again for bugfixing
 
-                active_cells = np.argwhere(coarse_dens_grid > np.max(coarse_dens_grid) * 0.001)
-
-                def process_cell(cell):
+                active_cells = np.argwhere(coarse_dens_grid > np.max(coarse_dens_grid) * 0.0001)
+                #defines an active cell to be where the density of the cell is more than a threshold 
+                def process_cell(cell): #defining a function in a function is an interesting choice but it saves passing many arguments through
                     cx, cy, cz = cell
                     cell_min_norm = cell / np.array(coarse_grid_size)
                     cell_max_norm = (cell + 1) / np.array(coarse_grid_size)
@@ -342,8 +340,8 @@ def process_with_interpolated_marching_cubes_cpu(
                     region_min = np.clip(cell_min - pad, bounds_min, bounds_max)
                     region_max = np.clip(cell_max + pad, bounds_min, bounds_max)
 
-                    mask = np.all((interp_pos >= region_min) & (interp_pos <= region_max), axis=1)
-                    if mask.sum() < 50:
+                    mask = np.all((interp_pos >= region_min) & (interp_pos <= region_max), axis=1)#defines the particles in each cell
+                    if mask.sum() < 50: #ignores the cell if theres less than this many particles
                         return None
 
                     local_pos_full = interp_pos[mask]
@@ -354,7 +352,7 @@ def process_with_interpolated_marching_cubes_cpu(
 
                     owning_cell_idx = cx * coarse_grid_size[1] * coarse_grid_size[2] + cy * coarse_grid_size[2] + cz
                     ownership_mask = local_flat_indices == owning_cell_idx
-                    if ownership_mask.sum() < 50: ##ignores cells with less than this many particles
+                    if ownership_mask.sum() < 5: ##ignores cells with less than this many particles
                         return None
 
                     halo_pos = local_pos_full[ownership_mask]
@@ -367,8 +365,8 @@ def process_with_interpolated_marching_cubes_cpu(
                     region_key = (cx, cy, cz)  # Unique key for the current region
                     region_density = dens_grid.max()
                     # Define hysteresis bounds
-                    lower_thresh = global_thresh * 1
-                    upper_thresh = global_thresh * 1.2
+                    lower_thresh = global_thresh * 1 # if this was less than global thresh it would try and form a mesh on an area below thresh, gives error
+                    upper_thresh = global_thresh * 2 # makes it hard for halo particles to become a surface again, stops flickering between the two
 
                     # Check previous state
                     was_meshable = meshable_region_cache.get(region_key, None)
@@ -385,21 +383,22 @@ def process_with_interpolated_marching_cubes_cpu(
 
                     meshable_region_cache[region_key] = meshable  # Update cache
 
-                    if not meshable:
+                    if not meshable:#if no surface can be formed, return only halo particles
                         return None, None, None, halo_pos, None, halo_colors_out, None
-                    
+                    #applies marching cubes to all cells below the threshold
                     verts, faces, normals, _ = marching_cubes(dens_grid, level=global_thresh)
                     scale = (region_max - region_min) / (np.array(grid_size) - 1)
                     verts_world = verts * scale + region_min
                     mesh = trimesh.Trimesh(vertices=verts_world, faces=faces, process=False)
+                    #uses laplacian smoothing to smooth blockiness
                     smoothed_mesh = laplacian_smooth(mesh, iterations=5, lam=0.4)
 
                     verts_world = smoothed_mesh.vertices
                     faces = smoothed_mesh.faces
                     normals = smoothed_mesh.vertex_normals
-
+                    #converts the energies to a grid similar to how density was done
                     energy_grid = pointcloud_to_grid_numba(local_pos_full, local_ie_full, grid_size, region_min, region_max)
-                    energy_grid = gaussian_filter(energy_grid, sigma=blur_sigma)
+                    energy_grid = gaussian_filter(energy_grid, sigma=blur_sigma)#blends edges
 
                     grid_coords = ((verts - 1e-4) / (np.array(grid_size) - 1) * (np.array(grid_size) - 1)).astype(int)
                     grid_coords = np.clip(grid_coords, 0, np.array(grid_size) - 1)
@@ -408,7 +407,7 @@ def process_with_interpolated_marching_cubes_cpu(
                     grad_y = np.gradient(dens_grid, axis=1)
                     grad_z = np.gradient(dens_grid, axis=2)
                     grad_grid = np.stack([grad_x, grad_y, grad_z], axis=-1)
-
+                    #calculates a density gradient vector
                     density_at_verts = dens_grid[grid_coords[:, 0], grid_coords[:, 1], grid_coords[:, 2]]
                     grad_at_verts = grad_grid[grid_coords[:, 0], grid_coords[:, 1], grid_coords[:, 2]]
                     grad_mag = np.linalg.norm(grad_at_verts, axis=1)
@@ -416,32 +415,34 @@ def process_with_interpolated_marching_cubes_cpu(
 
                     weight = np.clip(2000 * (density_at_verts - 0.001), 0.0, 1.0)
                     weight[grad_mag < 1e-6] = 0.0
+                    #applies weighting to the gids depending on density gradient
 
-                    light_dir = np.array([-1.0, 1.0, -1.0], dtype=np.float32)
+                    light_dir = np.array([-1.0, 1.0, -1.0], dtype=np.float32)#define your light direction
                     light_dir /= np.linalg.norm(light_dir)
-                    view_dir = np.array([0.0, 0.0, -1.0], dtype=np.float32)####################################################################
-
+                    view_dir = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+                    #annoyingly view direction is needed for specular lighting
                     normals_unit = normals / (np.linalg.norm(normals, axis=1, keepdims=True) + 1e-12)
                     grad_normals_unit = grad_at_verts / (grad_mag[:, None] + 1e-12)
                     shading_normals = (1.0 - weight[:, None]) * normals_unit + weight[:, None] * grad_normals_unit
                     shading_normals /= np.linalg.norm(shading_normals, axis=1, keepdims=True) + 1e-12
-
+                    #calculates the dot products for lighting
                     dot_nl = np.einsum('ij,j->i', shading_normals, light_dir)
                     facing_light = dot_nl > 0
                     dot_nl_clamped = np.clip(dot_nl, 0.0, 1.0)
                     diffuse = dot_nl_clamped
                     reflect_dir = 2 * dot_nl_clamped[:, None] * shading_normals - light_dir
                     reflect_dir /= np.linalg.norm(reflect_dir, axis=1, keepdims=True) + 1e-12
-                    dot_rv = np.einsum('ij,j->i', reflect_dir, view_dir)
-                    specular = np.clip(dot_rv, 0.0, 1.0) ** 12
-                    specular *= 0.6 * facing_light
-                    ambient_color = np.full((verts.shape[0], 3), 0.15, dtype=np.float32)  # You can tweak 0.1 to control intensity
-                    base_color = np.full((verts.shape[0], 3), 0.35, dtype=np.float32)
+                    dot_rv = np.einsum('ij,j->i', reflect_dir, view_dir)# calculates the dot of reflections and viewing direction for specular
+                    specular = np.clip(dot_rv, 0.0, 1.0) ** 12 #can vary this power to simulate different surface 'shininess'
+                    specular *= 0.6 * facing_light # this can also be varied
+                    ambient_color = np.full((verts.shape[0], 3), 0.15, dtype=np.float32)  #controls ambient lighting
+                    base_color = np.full((verts.shape[0], 3), 0.25, dtype=np.float32)#gives the body a base RGB colour for lighting
                     lit_color = ambient_color + base_color * diffuse[:, None] + specular[:, None]
 
-                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 3200
+                    temperature_kelvin = vertex_ie * (grid_size[0]**3) * 3200#this scales the vertices for black body temps,
+                    #constant varies on many parameters(global_thresh, grid sizes etc...) and so far is easiest to just try different ones
                     #print(max(temperature_kelvin), min(temperature_kelvin), np.mean(temperature_kelvin))
-                    raw_emission = get_blackbody_rgb_numba(temperature_kelvin)
+                    raw_emission = get_blackbody_rgb_numba(temperature_kelvin)#calculates an emissive colour for vertices
                     emission_strength = np.clip(temperature_kelvin / 8000.0, 0.0, 1.0) ** 2
                     blackbody_emission = raw_emission * emission_strength[:, None]
                     raw_color = lit_color + blackbody_emission
@@ -449,13 +450,14 @@ def process_with_interpolated_marching_cubes_cpu(
 
                     blend_weights = weights[grid_coords[:, 0], grid_coords[:, 1], grid_coords[:, 2]]
                     vertex_blackbody_color = scale_colors_keep_ratio_numba(raw_color, 1.0) * blend_weights[:, None]
+                    #blends the colours while keeping RGB ratios
 
                     return verts_world, faces, normals, halo_pos, vertex_ie, halo_colors_out, vertex_blackbody_color
 
                 all_verts, all_faces, all_normals = [], [], []
                 all_local_pos, all_vertex_ie = [], []
                 all_local_colors, all_vertex_blackbody_color = [], []
-
+                #this import allows for parallel CPU computations this drastically speeds up especially on HPC systems
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor() as executor:
                     results = list(executor.map(process_cell, active_cells))
@@ -497,7 +499,7 @@ def process_with_interpolated_marching_cubes_cpu(
                             vertex_internal_energy=np.concatenate(all_vertex_ie).astype(np.float32) if all_vertex_ie else np.empty((0,), dtype=np.float32),
                             halo_blackbody_color=np.vstack(all_local_colors).astype(np.float32),
                             vertex_blackbody_color=np.vstack(all_vertex_blackbody_color).astype(np.float32) if all_vertex_blackbody_color else np.empty((0, 3), dtype=np.float32))
-    
+                #these .npz files can sometimes be larger than the initial files, but allow for code to be split between GPU and CPU operations
                     print(f"Saved mesh frame {frame_counter} to {save_path}")
                     frame_counter += 1
 
@@ -507,10 +509,10 @@ def process_with_interpolated_marching_cubes_cpu(
                                    
                 
 if __name__ == "__main__":
-    input_folder = "snaps_better/"
+    input_folder = "outs/"
     output_folder = "meshes_interpolated/"
     bounds_min, bounds_max, globalmin_en, globalmax_en, dense_max = get_global_bounds(input_folder)
-    global_thresh = dense_max*0.0002 #for 10^6 this is 1.382e-5 (or 0.001*)#dense_max*0.001
+    global_thresh = dense_max*0.0002 #0.002 can sometimes be a bit too low
 
     process_with_interpolated_marching_cubes_cpu(
         input_folder,
@@ -522,7 +524,7 @@ if __name__ == "__main__":
         global_thresh,
         grid_size=(400,400, 400),         # High-res per region
         coarse_grid_size=(10, 10, 10),  # Coarse global scan
-        interp_steps=10,
+        interp_steps=10,            #needs at least 3 steps for hermite interpolation to work properly with arc lengths etc
         blur_sigma=1.2,
         padding_voxels=16                  # Padding to reduce continuity artifacts
 )
